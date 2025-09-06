@@ -3,19 +3,6 @@ MoldeAI Pro - Aplicativo de Conversão de Moldes com IA
 Transforma fotos de moldes desenhados em PDFs técnicos profissionais
 """
 import streamlit as st
-
-# Carregar secrets de forma segura
-def load_api_keys():
-    try:
-        vision_key = st.secrets["4acf51332e150fc1f337896c651f89cb947ac0ca	"]
-        gemini_key = st.secrets["AIzaSyC0xPSo_m-XTyuD8vW-OnACe5_pHOUR9CM"]
-        return vision_key, gemini_key
-    except:
-        return None, None
-
-# No main(), modificar para:
-vision_api_key, gemini_api_key = load_api_keys()
-import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -31,6 +18,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 import math
+import re
 
 # Configuração da página Streamlit
 st.set_page_config(
@@ -101,33 +89,52 @@ class Piece:
 class MoldeAIProcessor:
     """Processador principal do MoldeAI Pro"""
     
-    def __init__(self, vision_api_key: str = None, gemini_api_key: str = None):
+    def __init__(self):
         """
-        Inicializa o processador com as APIs do Google
-        
-        Args:
-            vision_api_key: Chave da API do Google Vision
-            gemini_api_key: Chave da API do Gemini
+        Inicializa o processador com as APIs do Google, carregadas de forma segura
+        a partir dos secrets do Streamlit.
         """
         self.vision_client = None
         self.gemini_model = None
+        self.credentials_loaded = False
         
-        # Configurar Google Vision se a chave estiver disponível
-        if vision_api_key:
-            os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = vision_api_key
-            self.vision_client = vision.ImageAnnotatorClient()
-        
-        # Configurar Gemini se a chave estiver disponível
-        if gemini_api_key:
-            genai.configure(api_key=gemini_api_key)
-            self.gemini_model = genai.GenerativeModel('gemini-pro-vision')
+        try:
+            # Carregar credenciais do Google Vision (Service Account JSON)
+            if "google_vision_credentials" in st.secrets:
+                # O st.secrets pode carregar o JSON como um dicionário, então garantimos que ele seja tratado corretamente
+                creds_info = st.secrets["google_vision_credentials"]
+
+                # Criar um arquivo temporário para as credenciais
+                with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as temp_creds:
+                    json.dump(creds_info, temp_creds)
+                    temp_creds_path = temp_creds.name
+
+                os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_creds_path
+                self.vision_client = vision.ImageAnnotatorClient()
+                st.session_state['vision_configured'] = True
+
+            # Carregar chave da API do Gemini
+            if "gemini_api_key" in st.secrets:
+                gemini_api_key = st.secrets["gemini_api_key"]
+                genai.configure(api_key=gemini_api_key)
+                self.gemini_model = genai.GenerativeModel('gemini-pro-vision')
+                st.session_state['gemini_configured'] = True
+
+            self.credentials_loaded = st.session_state.get('vision_configured', False) and \
+                                      st.session_state.get('gemini_configured', False)
+
+        except Exception as e:
+            st.error(f"Erro ao carregar as chaves de API: {e}")
+            self.credentials_loaded = False
+            if 'temp_creds_path' in locals() and os.path.exists(temp_creds_path):
+                os.remove(temp_creds_path)
         
         # Parâmetros padrão
         self.grid_size_mm = 10  # 1cm por quadrado
         self.a4_width_mm = 210
         self.a4_height_mm = 297
         self.dpi = 300
-        
+
     def correct_perspective(self, image: np.ndarray) -> np.ndarray:
         """
         Corrige a perspectiva da imagem usando detecção de bordas
@@ -489,18 +496,74 @@ class MoldeAIProcessor:
     
     def _parse_gemini_response(self, response_text: str, pieces: List[Piece]) -> Dict[str, any]:
         """
-        Processa a resposta do Gemini
+        Processa a resposta de texto do Gemini para extrair informações estruturadas.
         
         Args:
-            response_text: Texto da resposta
-            pieces: Lista de peças
+            response_text: Texto da resposta do Gemini.
+            pieces: Lista de peças para preencher com informações.
             
         Returns:
-            Análise estruturada
+            Dicionário com a análise estruturada.
         """
-        # Implementar parser para resposta do Gemini
-        # Por enquanto, retornar análise padrão
-        return self._default_analysis(pieces)
+        analysis = self._default_analysis(pieces)
+
+        try:
+            # 1. Extrair informações gerais
+            pattern_match = re.search(r"Padrão Geral:\s*(.*)", response_text, re.IGNORECASE)
+            if pattern_match:
+                analysis["pattern_type"] = pattern_match.group(1).strip()
+
+            instructions_match = re.search(r"Instruções de Montagem:(.*?)(\*\*\*|\Z)", response_text, re.DOTALL | re.IGNORECASE)
+            if instructions_match:
+                analysis["assembly_instructions"] = instructions_match.group(1).strip()
+
+            # 2. Dividir a resposta por peça
+            # O padrão busca por "*** Peça ID: Título ***" e captura o ID e o texto seguinte
+            piece_sections = re.split(r'\*\*\*\s*Peça\s*(\d+)[^***]*\*\*\*', response_text)[1:]
+
+            if not piece_sections:
+                return analysis # Retorna o default se não encontrar seções de peças
+
+            # Iterar sobre as seções de peças (id, texto)
+            for i in range(0, len(piece_sections), 2):
+                piece_id_str = piece_sections[i]
+                section_text = piece_sections[i+1]
+
+                if not piece_id_str:
+                    continue
+
+                piece_id = int(piece_id_str)
+
+                if piece_id not in analysis["pieces_info"]:
+                    continue
+
+                # 3. Extrair detalhes de cada peça
+                name_match = re.search(r"Nome Sugestivo:\s*(.*)", section_text, re.IGNORECASE)
+                if name_match:
+                    analysis["pieces_info"][piece_id]["suggested_name"] = name_match.group(1).strip()
+
+                quantity_match = re.search(r"Quantidade Recomendada:\s*(\d+)", section_text, re.IGNORECASE)
+                if quantity_match:
+                    analysis["pieces_info"][piece_id]["quantity"] = int(quantity_match.group(1))
+
+                tip_match = re.search(r"Dica de Corte:\s*(.*)", section_text, re.IGNORECASE)
+                if tip_match:
+                    analysis["pieces_info"][piece_id]["cutting_tip"] = tip_match.group(1).strip()
+
+                # Gerar uma descrição a partir dos dados
+                # Encontra a peça correspondente na lista original para obter dados não-gerados pela IA
+                original_piece = next((p for p in pieces if p.id == piece_id), None)
+                if original_piece:
+                    analysis["pieces_info"][piece_id]["description"] = (
+                        f"{analysis['pieces_info'][piece_id]['suggested_name']} "
+                        f"({original_piece.shape_type} {original_piece.color})"
+                    )
+
+        except Exception as e:
+            st.warning(f"Não foi possível processar a resposta da IA. Usando análise padrão. Erro: {e}")
+            return self._default_analysis(pieces)
+
+        return analysis
     
     def generate_pdf(self, pieces: List[Piece], analysis: Dict, scale: float) -> bytes:
         """
@@ -706,12 +769,28 @@ def main():
         st.markdown("""
         <div class="info-box">
         <b>APIs do Google</b><br>
-        Configure suas chaves de API para habilitar todos os recursos.
+        Para usar o app, configure suas credenciais do Google Cloud no menu de segredos (Secrets) do Streamlit.
         </div>
         """, unsafe_allow_html=True)
         
-        vision_api_key = st.text_input("Google Vision API Key", type="password")
-        gemini_api_key = st.text_input("Gemini API Key", type="password")
+        with st.expander("Como configurar as credenciais"):
+            st.markdown("""
+            1. No canto superior direito do seu app no Streamlit Cloud, clique em **Manage app**.
+            2. Vá para a seção **Secrets**.
+            3. Adicione um novo secret chamado `google_vision_credentials` e cole o conteúdo do seu arquivo JSON de credenciais de serviço do Google Vision.
+            4. Adicione outro secret chamado `gemini_api_key` e cole sua chave de API do Gemini.
+            5. Salve e reinicie o app.
+            """)
+
+        # Status das APIs
+        st.subheader("Status das APIs")
+        vision_status = "✅ Conectado" if st.session_state.get('vision_configured', False) else "❌ Desconectado"
+        gemini_status = "✅ Conectado" if st.session_state.get('gemini_configured', False) else "❌ Desconectado"
+        st.markdown(f"**Google Vision:** {vision_status}")
+        st.markdown(f"**Google Gemini:** {gemini_status}")
+
+        if not st.session_state.get('vision_configured', False) or not st.session_state.get('gemini_configured', False):
+            st.warning("Uma ou mais APIs não estão configuradas. Verifique os segredos.")
         
         st.markdown("---")
         
@@ -749,14 +828,17 @@ def main():
             # Exibir imagem original
             st.image(image, caption="Imagem Original", use_column_width=True)
             
+            # Instanciar o processador para carregar as chaves na inicialização
+            processor = MoldeAIProcessor()
+
             # Botão de processamento
             if st.button("🚀 Processar Molde", type="primary"):
+                if not processor.credentials_loaded:
+                    st.error("As credenciais da API do Google não foram carregadas. Verifique as configurações de secrets na barra lateral e reinicie o app.")
+                    st.stop()
+
                 with st.spinner("Processando... Isso pode levar alguns segundos."):
-                    # Criar processador
-                    processor = MoldeAIProcessor(
-                        vision_api_key=vision_api_key if vision_api_key else None,
-                        gemini_api_key=gemini_api_key if gemini_api_key else None
-                    )
+                    # Atribuir parâmetros da UI ao processador
                     processor.grid_size_mm = grid_size
                     
                     # Processar imagem
@@ -803,6 +885,18 @@ def main():
                 use_column_width=True
             )
             
+            # Análise Geral da IA
+            st.subheader("🧠 Análise da Inteligência Artificial")
+            analysis = st.session_state['analysis']
+
+            st.markdown(f"**Tipo de Padrão Identificado:** {analysis.get('pattern_type', 'Não identificado')}")
+
+            if "assembly_instructions" in analysis and analysis["assembly_instructions"]:
+                with st.expander("Instruções de Montagem Sugeridas"):
+                    st.markdown(analysis["assembly_instructions"])
+
+            st.markdown("---")
+
             # Informações das peças
             st.subheader(f"✂️ {len(st.session_state['pieces'])} peças detectadas")
             
@@ -843,11 +937,17 @@ def main():
             """.format(grid_size), unsafe_allow_html=True)
         else:
             st.markdown("""
-            <div class="warning-box">
-            <b>Aguardando processamento...</b><br>
-            Faça upload de uma imagem e clique em "Processar Molde" para começar.
+            <div class="info-box">
+            <b>Aguardando sua imagem!</b><br>
+            Faça o upload de uma foto do seu molde no painel à esquerda e clique em "Processar Molde" para que a mágica aconteça.
             </div>
             """, unsafe_allow_html=True)
+
+            # Mostrar um status inicial das APIs
+            if st.session_state.get('vision_configured', False) and st.session_state.get('gemini_configured', False):
+                st.success("APIs do Google conectadas e prontas!")
+            else:
+                st.warning("APIs do Google não configuradas. Por favor, adicione as credenciais na barra lateral para habilitar o processamento.")
     
     # Footer com instruções
     st.markdown("---")
@@ -919,5 +1019,11 @@ if __name__ == "__main__":
     if 'processed' not in st.session_state:
         st.session_state['processed'] = False
     
+    # Inicializar estado da configuração da API
+    if 'vision_configured' not in st.session_state:
+        st.session_state['vision_configured'] = False
+    if 'gemini_configured' not in st.session_state:
+        st.session_state['gemini_configured'] = False
+
     # Executar interface principal
     main()
