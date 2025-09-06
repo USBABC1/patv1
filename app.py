@@ -7,7 +7,7 @@ import streamlit as st
 # Carregar secrets de forma segura
 def load_api_keys():
     try:
-        vision_key = st.secrets["GOOGLE_VISION_API_KEY"]
+        vision_key = st.secrets["4acf51332e150fc1f337896c651f89cb947ac0ca	"]
         gemini_key = st.secrets["AIzaSyC0xPSo_m-XTyuD8vW-OnACe5_pHOUR9CM"]
         return vision_key, gemini_key
     except:
