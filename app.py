@@ -8,7 +8,7 @@ import streamlit as st
 def load_api_keys():
     try:
         vision_key = st.secrets["GOOGLE_VISION_API_KEY"]
-        gemini_key = st.secrets["GEMINI_API_KEY"]
+        gemini_key = st.secrets["AIzaSyC0xPSo_m-XTyuD8vW-OnACe5_pHOUR9CM"]
         return vision_key, gemini_key
     except:
         return None, None
