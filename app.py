@@ -2,7 +2,19 @@
 MoldeAI Pro - Aplicativo de Conversão de Moldes com IA
 Transforma fotos de moldes desenhados em PDFs técnicos profissionais
 """
+import streamlit as st
 
+# Carregar secrets de forma segura
+def load_api_keys():
+    try:
+        vision_key = st.secrets["GOOGLE_VISION_API_KEY"]
+        gemini_key = st.secrets["GEMINI_API_KEY"]
+        return vision_key, gemini_key
+    except:
+        return None, None
+
+# No main(), modificar para:
+vision_api_key, gemini_api_key = load_api_keys()
 import streamlit as st
 import cv2
 import numpy as np
